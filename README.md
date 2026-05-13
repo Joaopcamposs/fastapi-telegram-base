@@ -30,10 +30,10 @@ docker compose up postgres -d
 make dev
 
 # 5. Testar envio
-curl -X POST "http://localhost:8011/api/send?text=hello&reference_key=test-1"
+curl -X POST "http://localhost:8010/api/send?text=hello&reference_key=test-1"
 
 # 6. Testar edição
-curl -X PUT "http://localhost:8011/api/edit?reference_key=test-1&text=editado"
+curl -X PUT "http://localhost:8010/api/edit?reference_key=test-1&text=editado"
 ```
 
 Ou setup automatizado: `make setup` (descobre channel ID, gera secret, testa envio/edição).
@@ -45,9 +45,10 @@ Ou setup automatizado: `make setup` (descobre channel ID, gera secret, testa env
 | `TELEGRAM_BOT_TOKEN` | Token do @BotFather | `123456:ABC-DEF` |
 | `TELEGRAM_WEBHOOK_SECRET` | Secret para validar webhook | `openssl rand -hex 32` |
 | `TELEGRAM_CHANNEL_ID` | ID do canal alvo | `-1001234567890` |
-| `DATABASE_URL` | Connection string Postgres async | `postgresql+asyncpg://app:app@localhost:54311/app` |
+| `DATABASE_URL` | Connection string Postgres | `postgresql+asyncpg://app:app@localhost:54310/app` |
 | `TELEGRAM_POLLING` | `true` = polling (dev), `false` = webhook (prod) | `true` |
 | `LOG_LEVEL` | Nível de log (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
+| `DB_SCHEMA` | Schema PostgreSQL para isolamento (vazio = public) | `my_app` |
 
 ## Endpoints
 
@@ -55,24 +56,28 @@ Ou setup automatizado: `make setup` (descobre channel ID, gera secret, testa env
 |--------|------|-----------|
 | `GET` | `/health` | Health check |
 | `POST` | `/webhook/telegram` | Webhook Telegram (interno) |
+| `GET` | `/api/bot-info` | Info do bot + status webhook/polling |
+| `POST` | `/api/bot-webhook` | Registra webhook no Telegram |
 | `POST` | `/api/send` | Envia mensagem ao canal (retorna `message_id`, `status`) |
 | `PUT` | `/api/edit` | Edita mensagem por `reference_key` |
 | `GET` | `/api/pending` | Lista mensagens pendentes de atualização |
+| `POST` | `/api/demo` | Demo: envia, espera N segundos, edita (teste via Swagger) |
 
 ## Comandos
 
 | Comando | Descrição |
 |---------|-----------|
 | `make install` | Instala dependências via uv |
-| `make dev` | Servidor local com reload (:8011) |
-| `make run` | Servidor produção local (:8011) |
+| `make dev` | Servidor local com reload (:8010) |
+| `make run` | Servidor produção local (:8010) |
 | `make test` | Testes com coverage |
-| `make lint` | Ruff + ty check |
+| `make lint` | Ruff check + ty check (com auto-fix) |
 | `make format` | Auto-format com ruff |
 | `make setup` | Setup completo (bot + banco + validação) |
 | `make validate` | Testa envio/edição com dados mock |
-| `make up` | Docker compose up |
+| `make up` | Docker compose up (build + detached) |
 | `make down` | Docker compose down |
+| `make resetdb` | Destroi e recria banco (+ restart app) |
 | `make clean` | Remove volumes e cache |
 | `make deploy` | Deploy via FastAPI Cloud |
 
@@ -91,5 +96,6 @@ Ver [ARCHITECTURE.md](ARCHITECTURE.md) para:
 - Fluxo completo de scraping → envio → edição
 - Como criar jobs periódicos (scheduler)
 - Como adicionar novos scrapers, models, endpoints e comandos do bot
+- Database: pool strategy, SSL, schema isolation
 - Logging (o que cada módulo loga)
 - Deploy (FastAPI Cloud + Docker)

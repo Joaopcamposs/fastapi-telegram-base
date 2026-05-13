@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock
 
-from app.telegram import client
+from telegram import client
 
 
 async def test_send_message(mock_telegram):
@@ -46,10 +46,12 @@ async def test_retry_on_429(mock_telegram):
     """Verifica retry quando Telegram retorna 429."""
     rate_limit_resp = MagicMock()
     rate_limit_resp.status_code = 429
+    rate_limit_resp.headers = {"content-type": "application/json"}
     rate_limit_resp.json.return_value = {"parameters": {"retry_after": 0}}
 
     ok_resp = MagicMock()
     ok_resp.status_code = 200
+    ok_resp.headers = {"content-type": "application/json"}
     ok_resp.json.return_value = {"ok": True, "result": {"message_id": 42}}
     ok_resp.raise_for_status = MagicMock()
 

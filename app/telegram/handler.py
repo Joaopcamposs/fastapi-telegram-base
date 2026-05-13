@@ -3,14 +3,14 @@
 import logging
 from typing import Any
 
-from app.telegram import client
+from telegram import client
 
 logger = logging.getLogger(__name__)
 
 
 async def handle_update(update: dict[str, Any]) -> None:
     """Processa um update recebido via webhook ou polling."""
-    message = update.get("message")
+    message = update.get("message") or update.get("channel_post")
     if not message:
         logger.debug("Update sem message: %s", update.get("update_id"))
         return
@@ -18,7 +18,7 @@ async def handle_update(update: dict[str, Any]) -> None:
     chat_id = message["chat"]["id"]
     chat_type = message["chat"].get("type", "unknown")
     username = message.get("from", {}).get("username", "unknown")
-    text = message.get("text", "")
+    text = message.get("text", "").strip().split("@")[0]
 
     logger.info(
         "Update recebido: chat_id=%s type=%s user=%s text='%s'",
@@ -29,7 +29,7 @@ async def handle_update(update: dict[str, Any]) -> None:
     )
 
     if text.startswith("/start"):
-        await client.send_message(chat_id, "Bot ativo.")
+        await client.send_message(chat_id, "Bot ativo.\n\nComandos:\n/start\n/ping")
         return
 
     if text.startswith("/ping"):

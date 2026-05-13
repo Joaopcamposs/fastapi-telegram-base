@@ -5,7 +5,7 @@ description = "Base minimalista FastAPI + Telegram Bot com webhook interno"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "fastapi>=0.115.0",
+    "fastapi[standard]>=0.115.0",
     "uvicorn[standard]>=0.34.0",
     "sqlalchemy[asyncio]>=2.0.40",
     "asyncpg>=0.30.0",
@@ -29,15 +29,19 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["app"]
 
+[tool.ty.environment]
+extra-paths = ["app"]
+
 [tool.ruff]
 target-version = "py314"
-line-length = 88
+line-length = 95
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "RUF"]
+ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["app", "infra"]
+known-first-party = ["app", "infra", "telegram", "scheduler", "routes", "jobs"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

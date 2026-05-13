@@ -28,7 +28,7 @@ Projetado para rodar em **256MB RAM**, sem autenticação.
         │             │                 │
         │     ┌───────▼──┐       ┌──────▼─────┐
         └────►│ Telegram  │       │ PostgreSQL │
-              │ Bot API   │       │  :54311    │
+              │ Bot API   │       │  :54310    │
               └───────────┘       └────────────┘
 ```
 
@@ -36,12 +36,13 @@ Projetado para rodar em **256MB RAM**, sem autenticação.
 
 ```
 app/
-  main.py                  → Entry point, lifespan, rotas HTTP
+  main.py                  → Entry point, lifespan, webhook
+  routes.py                → APIRouter com endpoints de negócio (/api/*)
   scheduler.py             → Scheduler para rotinas periódicas
   infra/
     config.py              → Settings via pydantic-settings (.env)
-    database.py            → Engine async + session factory
-    models.py              → Base entity + SentMessage (UUID7, status)
+    database.py            → Engine async + session factory (SSL, pool strategy)
+    models.py              → Base entity + SentMessage (UUID7, status, schema)
   telegram/
     client.py              → Cliente HTTP (httpx) → Telegram API (retry + HTML)
     handler.py             → Processa updates (polling ou webhook)
@@ -54,8 +55,8 @@ tests/                     → Testes unitários (90%+ coverage, SQLite em memó
 scripts/
   setup.sh                 → Setup automático (bot + banco + validação)
   validate.sh              → Validação envio/edição com dados mock
-Dockerfile                 → Multi-stage build otimizado
-docker-compose.yml         → App :8011 + Postgres :54311 (256MB limit)
+Dockerfile                 → Multi-stage build otimizado (uvloop, --no-access-log)
+docker-compose.yml         → App :8010 + Postgres :54310 (256MB limit)
 Makefile                   → Comandos dev/prod/setup/validate
 ```
 
@@ -63,15 +64,22 @@ Makefile                   → Comandos dev/prod/setup/validate
 
 | Serviço | Porta externa | Porta interna |
 |---------|---------------|---------------|
-| FastAPI | 8011 | 8000 |
-| PostgreSQL | 54311 | 5432 |
+| FastAPI | 8010          | 8000 |
+| PostgreSQL | 54310      | 5432 |
 
 Portas não-padrão para evitar conflito com outros serviços locais.
 
 ## PYTHONPATH
 
-O projeto usa `PYTHONPATH=app` para que imports como `from infra.config` e `from app.telegram` funcionem.
+O projeto usa `PYTHONPATH=app` para que imports como `from infra.config` e `from telegram.client` funcionem.
 Já configurado em: Makefile, Dockerfile, pytest.ini e scripts.
+
+Imports internos usam path sem prefixo `app.`:
+```python
+from telegram import client       # não "from app.telegram"
+from infra.config import settings  # não "from app.infra.config"
+from scheduler import register     # não "from app.scheduler"
+```
 
 ---
 
@@ -105,7 +113,7 @@ Fluxo principal do app. Scraper coleta dados, envia mensagem "carregando" e depo
 
 ```python
 from infra.database import async_session
-from app.telegram.service import send_and_store, edit_by_reference, mark_error
+from telegram.service import send_and_store, edit_by_reference, mark_error
 
 
 async def scrape_and_notify(chat_id: int):
@@ -155,13 +163,16 @@ Tags suportadas: `<b>`, `<i>`, `<u>`, `<s>`, `<code>`, `<pre>`, `<a href>`.
 
 ```bash
 # Envia placeholder (retorna id UUID7 + message_id + status=pending)
-curl -X POST "http://localhost:8011/api/send?text=⏳+Carregando...&reference_key=btc-daily"
+curl -X POST "http://localhost:8010/api/send?text=⏳+Carregando...&reference_key=btc-daily"
 
 # Edita com dados finais (status → done)
-curl -X PUT "http://localhost:8011/api/edit?reference_key=btc-daily&text=📊+BTC:+$104.250"
+curl -X PUT "http://localhost:8010/api/edit?reference_key=btc-daily&text=📊+BTC:+$104.250"
 
 # Lista mensagens pendentes
-curl "http://localhost:8011/api/pending"
+curl "http://localhost:8010/api/pending"
+
+# Demo end-to-end (envia + espera + edita)
+curl -X POST "http://localhost:8010/api/demo?delay=2"
 ```
 
 ### Validação rápida
@@ -172,15 +183,35 @@ make validate   # envia 2 mensagens mock (BTC + ETH) e edita após 2s
 
 ---
 
+## Endpoints de Diagnóstico
+
+Endpoints para verificar status do bot e configurar webhook sem curl manual.
+
+```bash
+# Info do bot + status do webhook/polling
+curl http://localhost:8010/api/bot-info
+
+# Registrar webhook (produção)
+curl -X POST "http://localhost:8010/api/bot-webhook?url=https://meuapp.com"
+```
+
+`/api/bot-info` retorna: modo polling/webhook, dados do bot (@username), e status do webhook atual.
+
+`/api/bot-webhook` registra webhook no Telegram apontando para `{url}/webhook/telegram`, incluindo secret se configurado.
+
+---
+
 ## Scheduler (Rotinas Periódicas)
 
 Scheduler interno baseado em asyncio — sem dependências externas (sem celery, sem APScheduler).
 Inicia no lifespan, cancela no shutdown. Se um job falha, loga o erro e continua no próximo ciclo.
 
+Jobs têm delay inicial antes da primeira execução (evita race condition com banco/Telegram no startup).
+
 ### Como funciona
 
 ```python
-# app/scheduler.py
+# scheduler.py
 @register("nome-do-job", interval_seconds=300)
 async def meu_job():
     ...
@@ -196,8 +227,8 @@ O decorator `@register` adiciona o job à lista. `start_all()` no lifespan cria 
 # app/jobs/crypto_scraper.py
 import httpx
 
-from app.scheduler import register
-from app.telegram.service import send_and_store, edit_by_reference, mark_error
+from scheduler import register
+from telegram.service import send_and_store, edit_by_reference, mark_error
 from infra.config import settings
 from infra.database import async_session
 
@@ -232,7 +263,7 @@ async def scrape_crypto():
 2. Registre no `app/jobs/__init__.py`:
 
 ```python
-from app.jobs import example, crypto_scraper  # noqa: F401
+from jobs import example, crypto_scraper  # noqa: F401
 ```
 
 Pronto — roda automaticamente a cada 5 minutos.
@@ -265,6 +296,8 @@ App inicia
 
 O polling roda como `asyncio.Task` dentro do lifespan — não bloqueia o FastAPI. Se falhar, loga o erro, espera 3s e reconecta.
 
+O client HTTP usa `read=60s` timeout (maior que o long polling de 30s) para evitar `ReadTimeout`.
+
 ### Webhook (produção)
 
 ```
@@ -274,7 +307,10 @@ TELEGRAM_POLLING=false
 Telegram envia updates via POST para `/webhook/telegram`. Requer URL pública com HTTPS.
 
 ```bash
-# Configurar webhook após deploy
+# Configurar webhook via endpoint
+curl -X POST "http://localhost:8010/api/bot-webhook?url=https://meuapp.com"
+
+# Ou manualmente
 curl "https://api.telegram.org/bot<TOKEN>/setWebhook\
   ?url=https://<APP_URL>/webhook/telegram\
   &secret_token=<SECRET>"
@@ -294,8 +330,32 @@ O `TELEGRAM_WEBHOOK_SECRET` valida cada request via header `X-Telegram-Bot-Api-S
 Ambos os modos logam cada update recebido:
 
 ```
-14:32:01 INFO     app.telegram.handler — Update recebido: chat_id=123 type=private user=joao text='hello'
-14:32:01 INFO     app.telegram.client — Enviando mensagem para chat_id=123
+14:32:01 INFO     telegram.handler — Update recebido: chat_id=123 type=private user=joao text='hello'
+14:32:01 INFO     telegram.client — Enviando mensagem para chat_id=123
+```
+
+---
+
+## Telegram Handler
+
+`app/telegram/handler.py` — processa updates (polling ou webhook, mesmo handler).
+
+Suporta `message` e `channel_post` (canais). Strip automático de `@botname` suffix em grupos.
+
+Comandos implementados:
+
+| Comando | Resposta |
+|---------|----------|
+| `/start` | "Bot ativo." + lista de comandos |
+| `/ping` | "pong" |
+| qualquer outro | "Bot operando em modo automático. Comandos: /start /ping" |
+
+Para adicionar comando:
+
+```python
+if text.startswith("/cotacao"):
+    await client.send_message(chat_id, "<b>BTC</b>: $104.250")
+    return
 ```
 
 ---
@@ -313,8 +373,8 @@ Cada módulo loga suas ações:
 
 | Módulo | O que loga |
 |--------|-----------|
-| `main` | Lifespan (banco, polling/webhook, shutdown) |
-| `client` | Chamadas API, retry 429, open/close |
+| `main` | Lifespan (banco, schema, polling/webhook, shutdown) |
+| `client` | Chamadas API, retry 429, erros 4xx/5xx com body, open/close |
 | `handler` | Updates recebidos (chat, user, texto) |
 | `service` | Mensagens armazenadas, editadas, erros |
 | `scheduler` | Jobs iniciados, falhas |
@@ -322,34 +382,43 @@ Cada módulo loga suas ações:
 
 Formato: `HH:MM:SS LEVEL    module — mensagem`
 
----
-
-## Camadas
-
-| Camada | Arquivo | Responsabilidade |
-|--------|---------|------------------|
-| **HTTP** | `app/main.py` | Rotas, lifespan, webhook, scheduler |
-| **Scheduler** | `app/scheduler.py` | Registro e execução de jobs periódicos |
-| **Jobs** | `app/jobs/*.py` | Rotinas periódicas (scrapers, notificações) |
-| **Service** | `app/telegram/service.py` | Envio/edição + persistência + status |
-| **Client** | `app/telegram/client.py` | Telegram Bot API (retry 429 + HTML) |
-| **Polling** | `app/telegram/polling.py` | Long polling para dev local |
-| **Handler** | `app/telegram/handler.py` | Processamento de updates recebidos |
-| **Model** | `app/infra/models.py` | Entidades SQLAlchemy 2.0 |
-| **Config** | `app/infra/config.py` | Variáveis de ambiente |
-| **Database** | `app/infra/database.py` | Engine async + session factory |
-
-Dependência flui para baixo: HTTP → Service → Client/Model. Nunca para cima.
+Erros da Telegram API são logados com response body completo para debug.
 
 ---
 
 ## Banco de Dados
 
-SQLAlchemy 2.0 async com asyncpg. Pool fixo: `pool_size=5`, `max_overflow=5`.
+SQLAlchemy 2.0 async com asyncpg.
 
-**TimestampMixin** — `created_at`/`updated_at` automáticos em todas entidades.
+### Pool Strategy
 
-**SentMessage** — Armazena tudo que foi enviado:
+| Ambiente | Pool | Configuração |
+|----------|------|-------------|
+| Local (`localhost`) | Pooled | `pool_size=5`, `max_overflow=5`, `pool_pre_ping=True` |
+| Cloud (Neon, Supabase) | NullPool | Sem pool — serverless precisa de NullPool |
+
+Detecção automática via URL: se contém `localhost`/`127.0.0.1` → pool, senão → NullPool.
+
+### SSL
+
+Conexão SSL ativada automaticamente quando URL contém `sslmode=require`, `sslmode=verify` ou `supabase`.
+
+### Schema Isolation
+
+`DB_SCHEMA` no `.env` isola tabelas em schema PostgreSQL dedicado. Útil para multi-tenant ou organização.
+
+```
+DB_SCHEMA=my_app     # tabelas criadas em schema "my_app"
+DB_SCHEMA=           # usa schema "public" (padrão)
+```
+
+O schema é criado automaticamente no startup (`CREATE SCHEMA IF NOT EXISTS`). Search path configurado via event listener em cada conexão.
+
+### Startup Resiliente
+
+Se banco estiver indisponível no startup, app sobe com warning — tabelas serão criadas na primeira conexão. Permite deploy antes do banco estar ready.
+
+### SentMessage
 
 | Campo | Tipo | Descrição |
 |-------|------|-----------|
@@ -363,6 +432,8 @@ SQLAlchemy 2.0 async com asyncpg. Pool fixo: `pool_size=5`, `max_overflow=5`.
 | `created_at` | datetime (tz) | Timestamp criação |
 | `updated_at` | datetime (tz) | Timestamp última atualização |
 
+**TimestampMixin** — `created_at`/`updated_at` automáticos em todas entidades.
+
 Tabelas criadas automaticamente no lifespan. Para produção, migrar para **Alembic**.
 
 ---
@@ -373,7 +444,9 @@ Tabelas criadas automaticamente no lifespan. Para produção, migrar para **Alem
 
 - **`parse_mode=HTML`** por padrão em `send_message`, `edit_message_text`, `send_photo`
 - **Retry automático** em 429 (rate limit) — respeita `retry_after`, até 3 tentativas
+- **Log de erros** — respostas 4xx/5xx logadas com body completo antes do raise
 - **Singleton** — reutiliza conexões TCP via `httpx.AsyncClient`
+- **Timeout** — `10s` connect/write, `60s` read (compatível com long polling)
 
 Funções disponíveis:
 
@@ -389,25 +462,23 @@ Funções disponíveis:
 
 ---
 
-## Telegram Handler
+## Camadas
 
-`app/telegram/handler.py` — processa updates (polling ou webhook, mesmo handler).
+| Camada | Arquivo | Responsabilidade |
+|--------|---------|------------------|
+| **HTTP** | `main.py` | Entry point, lifespan, webhook |
+| **Routes** | `routes.py` | Endpoints de negócio (APIRouter) |
+| **Scheduler** | `scheduler.py` | Registro e execução de jobs periódicos |
+| **Jobs** | `jobs/*.py` | Rotinas periódicas (scrapers, notificações) |
+| **Service** | `telegram/service.py` | Envio/edição + persistência + status |
+| **Client** | `telegram/client.py` | Telegram Bot API (retry 429 + HTML) |
+| **Polling** | `telegram/polling.py` | Long polling para dev local |
+| **Handler** | `telegram/handler.py` | Processamento de updates recebidos |
+| **Model** | `infra/models.py` | Entidades SQLAlchemy 2.0 |
+| **Config** | `infra/config.py` | Variáveis de ambiente |
+| **Database** | `infra/database.py` | Engine async + session factory |
 
-Comandos implementados:
-
-| Comando | Resposta |
-|---------|----------|
-| `/start` | "Bot ativo." |
-| `/ping` | "pong" |
-| qualquer outro | "Bot operando em modo automático. Comandos: /start /ping" |
-
-Para adicionar comando:
-
-```python
-if text.startswith("/cotacao"):
-    await client.send_message(chat_id, "<b>BTC</b>: $104.250")
-    return
-```
+Dependência flui para baixo: HTTP → Service → Client/Model. Nunca para cima.
 
 ---
 
@@ -417,6 +488,7 @@ if text.startswith("/cotacao"):
 
 - **Banco**: SQLite em memória via `aiosqlite`
 - **Telegram**: mock completo via `unittest.mock`
+- **Schema**: `DB_SCHEMA=""` forçado nos testes (SQLite não suporta schemas)
 - **Segurança extra**: `DATABASE_URL` forçado pra `localhost:1` (porta inválida) no conftest — se algum código vazar da fixture, falha com connection refused
 
 ```bash
@@ -428,12 +500,13 @@ make test   # pytest -x --tb=short -q --cov=app --cov-report=term-missing
 ## Otimizações (256MB)
 
 - **httpx singleton** — reutiliza conexões TCP
-- **Pool pequeno** — 5+5 conexões (suficiente para bot)
+- **Pool strategy** — pooled local, NullPool cloud (evita leak em serverless)
 - **uvloop** — event loop otimizado em C
 - **--no-access-log** — reduz I/O em produção
 - **Multi-stage Docker** — imagem final sem build tools
 - **expire_on_commit=False** — evita lazy loads desnecessários
 - **UUID7** — ordenável por tempo, gerado no app (sem roundtrip ao banco)
+- **Startup resiliente** — app sobe mesmo sem banco disponível
 
 ---
 
@@ -458,22 +531,21 @@ class Alert(TimestampMixin, Base):
 
 ### Adicionar novo endpoint
 
-Crie router e registre no `app/main.py`:
+Adicione no `app/routes.py` ou crie novo router:
 
 ```python
-# app/routes/alerts.py
-from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-from infra.database import get_session
-
-router = APIRouter(prefix="/api/alerts", tags=["alerts"])
-
-@router.get("/")
+# app/routes.py (adicionar ao router existente)
+@router.get("/alerts")
 async def list_alerts(session: AsyncSession = Depends(get_session)):
     ...
 
-# app/main.py
-from app.routes.alerts import router as alerts_router
+# Ou criar novo router em arquivo separado:
+# app/routes_alerts.py
+from fastapi import APIRouter
+router = APIRouter(prefix="/api/alerts", tags=["alerts"])
+
+# Registrar no main.py:
+from routes_alerts import router as alerts_router
 app.include_router(alerts_router)
 ```
 
@@ -496,8 +568,8 @@ Configurar `alembic/env.py` com async engine e `Base.metadata`.
 # 1. Deploy
 make deploy
 
-# 2. Configurar webhook Telegram
-curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<APP_URL>/webhook/telegram&secret_token=<SECRET>"
+# 2. Configurar webhook via endpoint
+curl -X POST "https://<APP_URL>/api/bot-webhook?url=https://<APP_URL>"
 ```
 
 Entry point: `app.main:app`. Variáveis de ambiente configuradas no painel.
@@ -506,10 +578,21 @@ Entry point: `app.main:app`. Variáveis de ambiente configuradas no painel.
 
 ```bash
 docker build -t fastapi-telegram-base .
-docker run -p 8011:8000 --env-file .env fastapi-telegram-base
+docker run -p 8010:8000 --env-file .env fastapi-telegram-base
 ```
 
 Compatível com: Railway, Render, Fly.io, Cloud Run, ECS.
+
+### Variáveis necessárias em produção
+
+```
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHANNEL_ID=...
+TELEGRAM_WEBHOOK_SECRET=...
+TELEGRAM_POLLING=false
+DATABASE_URL=postgresql+asyncpg://...
+LOG_LEVEL=INFO
+```
 
 ---
 
@@ -518,14 +601,15 @@ Compatível com: Railway, Render, Fly.io, Cloud Run, ECS.
 | Comando | Descrição |
 |---------|-----------|
 | `make install` | Instala dependências via uv |
-| `make dev` | Servidor local com reload (:8011) |
-| `make run` | Servidor produção local (:8011) |
+| `make dev` | Servidor local com reload (:8010) |
+| `make run` | Servidor produção local (:8010) |
 | `make test` | Testes com coverage |
-| `make lint` | Ruff + ty check |
+| `make lint` | Ruff check + ty check (com auto-fix) |
 | `make format` | Auto-format com ruff |
 | `make setup` | Setup completo (bot + banco + validação) |
 | `make validate` | Testa envio/edição com dados mock |
-| `make up` | Docker compose up |
+| `make up` | Docker compose up (build + detached) |
 | `make down` | Docker compose down |
+| `make resetdb` | Destroi banco + recria + restart app |
 | `make clean` | Remove volumes e cache |
 | `make deploy` | Deploy via FastAPI Cloud |
